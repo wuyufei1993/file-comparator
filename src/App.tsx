@@ -1,14 +1,11 @@
-import { useState, useCallback, useMemo, useRef, useEffect } from 'react';
+import { useState, useMemo, useRef, useEffect } from 'react';
 import { DiffEditor } from '@monaco-editor/react';
-import { 
-  FileCode, 
-  Upload, 
-  ArrowRightLeft, 
-  Type, 
-  Files, 
-  Trash2, 
+import {
+  ArrowRightLeft,
+  Type,
+  Files,
+  Trash2,
   Settings as SettingsIcon,
-  ChevronRight,
   FileText,
   X,
   Languages,
