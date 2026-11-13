@@ -1,319 +1,757 @@
-import { useState, useMemo, useRef, useEffect } from 'react';
-import { DiffEditor } from '@monaco-editor/react';
+import { lazy, Suspense, useEffect, useRef, useState } from "react";
+import type { OnMount } from "@monaco-editor/react";
+import type { editor, IDisposable } from "monaco-editor";
 import {
+  ArrowDown,
   ArrowRightLeft,
-  Type,
-  Files,
-  Trash2,
-  Settings as SettingsIcon,
-  FileText,
-  X,
-  Languages,
+  ArrowUp,
   Check,
-  FolderOpen
-} from 'lucide-react';
-import { open } from '@tauri-apps/plugin-dialog';
-import { readTextFile } from '@tauri-apps/plugin-fs';
-import './App.css';
+  FolderOpen,
+  Loader2,
+  Maximize2,
+  Minimize2,
+  Minus,
+  Settings2,
+  Trash2,
+  Undo2,
+  WrapText,
+  X,
+} from "lucide-react";
+import { isTauri } from "@tauri-apps/api/core";
+import { getCurrentWindow } from "@tauri-apps/api/window";
+import { open } from "@tauri-apps/plugin-dialog";
+import { readFile, stat } from "@tauri-apps/plugin-fs";
+import "./App.css";
 
-// --- Localization ---
+const DiffEditor = lazy(() => import("./ComparisonEditor"));
+
 const translations = {
-  en: {
-    fileCompare: 'File Compare',
-    textCompare: 'Text Compare',
-    home: 'Home',
-    files: 'Files',
-    paste: 'Paste',
-    swap: 'Swap',
-    clear: 'Clear',
-    leftLabel: 'LEFT (Original)',
-    rightLabel: 'RIGHT (Modified)',
-    chooseFile: 'Open File...',
-    readyTitle: 'Ready to Compare',
-    readyDescFile: 'Select two files from your computer to see what changed.',
-    readyDescPaste: 'Type or paste text directly into the editors below to compare.',
-    selectFirst: 'Select First File',
-    mode: 'Mode',
-    engine: 'Engine',
-    readyStatus: 'Ready',
-    settings: 'Settings',
-    language: 'Language',
-    close: 'Close',
-    done: 'Done'
-  },
   zh: {
-    fileCompare: '文件对比',
-    textCompare: '文本对比',
-    home: '首页',
-    files: '文件模式',
-    paste: '文本模式',
-    swap: '左右对调',
-    clear: '清空',
-    leftLabel: '左侧 (原始)',
-    rightLabel: '右侧 (修改后)',
-    chooseFile: '打开文件...',
-    readyTitle: '准备就绪',
-    readyDescFile: '从您的电脑选择两个文件以查看差异。',
-    readyDescPaste: '直接在下方编辑器中输入或粘贴文本进行对比分析。',
-    selectFirst: '选择第一个文件',
-    mode: '模式',
-    engine: '引擎',
-    readyStatus: '运行中',
-    settings: '设置',
-    language: '语言',
-    close: '关闭',
-    done: '完成'
-  }
+    comparison: "内容对比",
+    settings: "偏好设置",
+    original: "原始内容",
+    modified: "修改内容",
+    select: "选择文件",
+    replace: "更换文件",
+    uploadNote: "UTF-8 文本文件 · 最大 10 MB",
+    inputHint: "在此输入、粘贴文本，或选择上方文件",
+    swap: "左右对调",
+    clear: "清空内容",
+    undo: "撤销",
+    cleared: "内容已清空",
+    whitespace: "忽略行首尾空格",
+    wrap: "自动换行",
+    previous: "上一处差异",
+    next: "下一处差异",
+    changes: "处差异",
+    added: "新增",
+    removed: "删除",
+    lines: "行",
+    ready: "输入文本或选择文件开始对比",
+    same: "两侧内容一致",
+    computing: "正在计算差异",
+    language: "界面语言",
+    fontSize: "字号",
+    minimap: "显示缩略图",
+    load: "正在加载编辑器…",
+    reading: "正在读取文件…",
+    error: "无法读取文件，请确认文件为 UTF-8 文本且可访问。",
+    tooLarge: "文件超过 10 MB，请选择较小的文本文件。",
+    binary: "暂不支持二进制文件，请选择 UTF-8 文本文件。",
+    close: "关闭",
+    minimize: "最小化",
+    maximize: "最大化",
+    restoreWindow: "还原窗口",
+    windowError: "窗口操作失败，请重试。",
+  },
+  en: {
+    comparison: "Content comparison",
+    settings: "Preferences",
+    original: "Original",
+    modified: "Modified",
+    select: "Choose file",
+    replace: "Replace file",
+    uploadNote: "UTF-8 text files · Up to 10 MB",
+    inputHint: "Type or paste text here, or choose a file above",
+    swap: "Swap sides",
+    clear: "Clear all",
+    undo: "Undo",
+    cleared: "Content cleared",
+    whitespace: "Ignore edge whitespace",
+    wrap: "Word wrap",
+    previous: "Previous difference",
+    next: "Next difference",
+    changes: "differences",
+    added: "Added",
+    removed: "Removed",
+    lines: "lines",
+    ready: "Enter text or choose files to compare",
+    same: "Both sides are identical",
+    computing: "Calculating differences",
+    language: "Interface language",
+    fontSize: "Font size",
+    minimap: "Show minimap",
+    load: "Loading editor…",
+    reading: "Reading file…",
+    error: "Unable to read this file. Check access and UTF-8 encoding.",
+    tooLarge: "This file exceeds 10 MB. Please choose a smaller text file.",
+    binary: "Binary files are not supported. Please choose a UTF-8 text file.",
+    close: "Close",
+    minimize: "Minimize",
+    maximize: "Maximize",
+    restoreWindow: "Restore window",
+    windowError: "Window action failed. Please try again.",
+  },
 };
-
+type Lang = keyof typeof translations;
+type Side = "original" | "modified";
 interface FileData {
   name: string;
   path: string;
   content: string;
 }
+type Session = Record<Side, FileData>;
+interface Preferences {
+  lang: Lang;
+  wrap: boolean;
+  ignoreWhitespace: boolean;
+  minimap: boolean;
+  fontSize: number;
+}
+const emptyFile = (): FileData => ({ name: "", path: "", content: "" });
+const emptySession = (): Session => ({
+  original: emptyFile(),
+  modified: emptyFile(),
+});
+const defaultPreferences: Preferences = {
+  lang: "zh",
+  wrap: false,
+  ignoreWhitespace: false,
+  minimap: true,
+  fontSize: 14,
+};
+const MIN_FONT_SIZE = 6;
+const MAX_FONT_SIZE = 100;
+const isValidFontSize = (value: unknown): value is number =>
+  typeof value === "number" &&
+  Number.isInteger(value) &&
+  value >= MIN_FONT_SIZE &&
+  value <= MAX_FONT_SIZE;
+function readPreferences(): Preferences {
+  try {
+    const saved = JSON.parse(
+      localStorage.getItem("file-comparator.preferences") || "{}",
+    );
+    return {
+      lang: saved.lang === "en" ? "en" : "zh",
+      wrap: saved.wrap === true,
+      ignoreWhitespace: saved.ignoreWhitespace === true,
+      minimap:
+        typeof saved.minimap === "boolean"
+          ? saved.minimap
+          : defaultPreferences.minimap,
+      fontSize: isValidFontSize(saved.fontSize)
+        ? saved.fontSize
+        : defaultPreferences.fontSize,
+    };
+  } catch {
+    return defaultPreferences;
+  }
+}
+const lineCount = (value: string) =>
+  value ? value.split(/\r\n|\r|\n/).length : 0;
 
 function App() {
-  const [original, setOriginal] = useState<FileData>({ name: '', path: '', content: '' });
-  const [modified, setModified] = useState<FileData>({ name: '', path: '', content: '' });
-  const [mode, setMode] = useState<'file' | 'paste'>('file');
-  const [lang, setLang] = useState<'en' | 'zh'>('zh');
+  const [session, setSession] = useState<Session>(emptySession);
+  const [maximized, setMaximized] = useState(false);
+  const [preferences, setPreferences] = useState(readPreferences);
+  const [fontSizeInput, setFontSizeInput] = useState(() =>
+    String(preferences.fontSize),
+  );
   const [showSettings, setShowSettings] = useState(false);
-  
-  const diffEditorRef = useRef<any>(null);
-
-  const t = useMemo(() => translations[lang], [lang]);
-
-  const handleSelectFile = async (side: 'original' | 'modified') => {
-    try {
-      const selected = await open({
-        multiple: false,
-        filters: [{
-          name: 'All Files',
-          extensions: ['*']
-        }]
-      });
-      
-      if (selected && typeof selected === 'string') {
-        const content = await readTextFile(selected);
-        const name = selected.split(/[\\/]/).pop() || selected;
-        const data = { name, path: selected, content };
-        if (side === 'original') {
-          setOriginal(data);
-          if (diffEditorRef.current) diffEditorRef.current.getOriginalEditor().setValue(content);
-        } else {
-          setModified(data);
-          if (diffEditorRef.current) diffEditorRef.current.getModifiedEditor().setValue(content);
-        }
-      }
-    } catch (err) {
-      console.error('Failed to open file:', err);
-    }
-  };
-
-  const handleSwap = () => {
-    if (!diffEditorRef.current) return;
-    
-    const leftVal = diffEditorRef.current.getOriginalEditor().getValue();
-    const rightVal = diffEditorRef.current.getModifiedEditor().getValue();
-    
-    const tempOriginal = { ...original, content: rightVal };
-    const tempModified = { ...modified, content: leftVal };
-    
-    setOriginal(tempOriginal);
-    setModified(tempModified);
-
-    diffEditorRef.current.getOriginalEditor().setValue(rightVal);
-    diffEditorRef.current.getModifiedEditor().setValue(leftVal);
-  };
-
-  const handleClear = () => {
-    setOriginal({ name: '', path: '', content: '' });
-    setModified({ name: '', path: '', content: '' });
-    if (diffEditorRef.current) {
-      diffEditorRef.current.getOriginalEditor().setValue('');
-      diffEditorRef.current.getModifiedEditor().setValue('');
-    }
-  };
-
-  const handleEditorMount = (editor: any) => {
-    diffEditorRef.current = editor;
-    editor.getOriginalEditor().setValue(original.content);
-    editor.getModifiedEditor().setValue(modified.content);
-    editor.getOriginalEditor().updateOptions({ readOnly: mode === 'file' });
-    editor.getModifiedEditor().updateOptions({ readOnly: mode === 'file' });
-  };
+  const [busy, setBusy] = useState<Side | null>(null);
+  const [error, setError] = useState("");
+  const [undo, setUndo] = useState<Session | null>(null);
+  const [summary, setSummary] = useState({
+    changes: 0,
+    added: 0,
+    removed: 0,
+    original: "",
+    modified: "",
+    ignoreWhitespace: false,
+  });
+  const diffRef = useRef<editor.IStandaloneDiffEditor | null>(null);
+  const listeners = useRef<IDisposable[]>([]);
+  const sessionRef = useRef(session);
+  sessionRef.current = session;
+  const preferencesRef = useRef(preferences);
+  preferencesRef.current = preferences;
+  const dialogRef = useRef<HTMLDialogElement>(null);
+  const pickerRef = useRef<HTMLInputElement>(null);
+  const pickerSide = useRef<Side>("original");
+  const t = translations[preferences.lang];
+  const hasContent = !!(
+    session.original.content ||
+    session.modified.content ||
+    session.original.name ||
+    session.modified.name
+  );
+  const canCompare = hasContent;
+  const pending =
+    canCompare &&
+    (summary.original !== session.original.content ||
+      summary.modified !== session.modified.content ||
+      summary.ignoreWhitespace !== preferences.ignoreWhitespace);
 
   useEffect(() => {
-    if (diffEditorRef.current) {
-      diffEditorRef.current.getOriginalEditor().updateOptions({ readOnly: mode === 'file' });
-      diffEditorRef.current.getModifiedEditor().updateOptions({ readOnly: mode === 'file' });
+    try {
+      localStorage.setItem(
+        "file-comparator.preferences",
+        JSON.stringify(preferences),
+      );
+    } catch {
+      /* Keep preferences in memory when storage is unavailable. */
     }
-  }, [mode]);
+    document.documentElement.lang = preferences.lang === "zh" ? "zh-CN" : "en";
+  }, [preferences]);
+  useEffect(() => {
+    if (showSettings) dialogRef.current?.showModal();
+    else dialogRef.current?.close();
+  }, [showSettings]);
+  useEffect(() => {
+    if (!isTauri()) return;
+    const appWindow = getCurrentWindow();
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+    const updateMaximized = async () => {
+      const value = await appWindow.isMaximized();
+      if (!disposed) setMaximized(value);
+    };
+    void updateMaximized().catch(console.error);
+    void appWindow.onResized(() => {
+      void updateMaximized().catch(console.error);
+    }).then((cleanup) => {
+      if (disposed) cleanup();
+      else unlisten = cleanup;
+    }).catch(console.error);
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, []);
+  useEffect(
+    () => () => {
+      listeners.current.forEach((listener) => listener.dispose());
+    },
+    [],
+  );
+
+  const updatePreference = <K extends keyof Preferences>(
+    key: K,
+    value: Preferences[K],
+  ) => setPreferences((previous) => ({ ...previous, [key]: value }));
+  const windowAction = async (action: "minimize" | "toggleMaximize" | "close") => {
+    try {
+      await getCurrentWindow()[action]();
+    } catch {
+      setError(t.windowError);
+    }
+  };
+  const storeFile = (
+    side: Side,
+    name: string,
+    path: string,
+    bytes: Uint8Array,
+  ) => {
+    if (bytes.byteLength > 10 * 1024 * 1024) throw new Error(t.tooLarge);
+    let content: string;
+    try {
+      content = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+      if (content.includes("\0")) throw new Error();
+    } catch {
+      throw new Error(t.binary);
+    }
+    setSession((previous) => ({
+      ...previous,
+      [side]: { name, path, content },
+    }));
+    setUndo(null);
+  };
+  const selectFile = async (side: Side) => {
+    if (busy) return;
+    setError("");
+    if (!isTauri()) {
+      pickerSide.current = side;
+      pickerRef.current?.click();
+      return;
+    }
+    setBusy(side);
+    try {
+      const path = await open({ multiple: false, directory: false });
+      if (typeof path === "string") {
+        if ((await stat(path)).size > 10 * 1024 * 1024)
+          throw new Error(t.tooLarge);
+        storeFile(
+          side,
+          path.split(/[\\/]/).pop() || path,
+          path,
+          await readFile(path),
+        );
+      }
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : t.error);
+    } finally {
+      setBusy(null);
+    }
+  };
+  const loadBrowserFile = async (file?: File) => {
+    if (!file) return;
+    const side = pickerSide.current;
+    setBusy(side);
+    setError("");
+    try {
+      if (file.size > 10 * 1024 * 1024) throw new Error(t.tooLarge);
+      storeFile(
+        side,
+        file.name,
+        file.name,
+        new Uint8Array(await file.arrayBuffer()),
+      );
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : t.error);
+    } finally {
+      setBusy(null);
+    }
+  };
+  const swap = () => {
+    setSession((previous) => ({
+      original: previous.modified,
+      modified: previous.original,
+    }));
+    setUndo(null);
+  };
+  const clear = () => {
+    setUndo(session);
+    setSession(emptySession());
+    setError("");
+  };
+  const restore = () => {
+    if (!undo) return;
+    setSession(undo);
+    setUndo(null);
+  };
+  const onMount = (
+    instance: editor.IStandaloneDiffEditor,
+    monaco: Parameters<OnMount>[1],
+  ) => {
+    listeners.current.forEach((listener) => listener.dispose());
+    diffRef.current = instance;
+    const updateSummary = () => {
+      const changes = instance.getLineChanges();
+      if (!changes) return;
+      setSummary({
+        changes: changes.length,
+        added: changes.reduce(
+          (sum, change) =>
+            sum +
+            (change.modifiedEndLineNumber === 0
+              ? 0
+              : change.modifiedEndLineNumber -
+                change.modifiedStartLineNumber +
+                1),
+          0,
+        ),
+        removed: changes.reduce(
+          (sum, change) =>
+            sum +
+            (change.originalEndLineNumber === 0
+              ? 0
+              : change.originalEndLineNumber -
+                change.originalStartLineNumber +
+                1),
+          0,
+        ),
+        original: instance.getOriginalEditor().getValue(),
+        modified: instance.getModifiedEditor().getValue(),
+        ignoreWhitespace: preferencesRef.current.ignoreWhitespace,
+      });
+    };
+    listeners.current = [
+      instance.onDidUpdateDiff(updateSummary),
+      ...(["original", "modified"] as Side[]).map((side) => {
+        const pane =
+          side === "original"
+            ? instance.getOriginalEditor()
+            : instance.getModifiedEditor();
+        pane.addAction({
+          id: `next-difference-${side}`,
+          label: "Next difference",
+          keybindings: [monaco.KeyCode.F7],
+          run: () => instance.goToDiff("next"),
+        });
+        pane.addAction({
+          id: `previous-difference-${side}`,
+          label: "Previous difference",
+          keybindings: [monaco.KeyMod.Shift | monaco.KeyCode.F7],
+          run: () => instance.goToDiff("previous"),
+        });
+        return pane.onDidChangeModelContent(() => {
+          const content = pane.getValue();
+          if (content === sessionRef.current[side].content) return;
+          setUndo(null);
+          setSession((previous) =>
+            previous[side].content === content
+              ? previous
+              : {
+                  ...previous,
+                  [side]: { ...previous[side], content },
+                },
+          );
+        });
+      }),
+    ];
+    updateSummary();
+  };
+  const status = !canCompare
+    ? t.ready
+    : pending
+      ? t.computing
+      : summary.changes === 0
+        ? t.same
+        : `${summary.changes} ${preferences.lang === "en" && summary.changes === 1 ? "difference" : t.changes}`;
+  const language =
+    session.original.name.endsWith(".json") ||
+    session.modified.name.endsWith(".json")
+      ? "json"
+      : "plaintext";
 
   return (
-    <div className="app-container">
-      {/* Sidebar/Nav */}
-      <nav className="side-nav">
-        <div className="nav-logo" title="FileComparator">
-          <div className="custom-logo">
-            <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-              <path d="M4 4V20H20V4H4Z" stroke="currentColor" strokeWidth="2" strokeLinejoin="round"/>
-              <path d="M9 8H15M9 12H15M9 16H13" stroke="currentColor" strokeWidth="2" strokeLinecap="round"/>
-              <path d="M18 18L21 21" stroke="currentColor" strokeWidth="2" strokeLinecap="round"/>
-            </svg>
-          </div>
+    <div className="app-shell">
+      <header className={`toolbar ${isTauri() ? "desktop-toolbar" : ""}`} data-tauri-drag-region>
+        <div className="brand" data-tauri-drag-region>
+          <img src="./logo.svg" width="28" height="28" alt="" draggable={false} data-tauri-drag-region />
+          <strong data-tauri-drag-region>FileComparator</strong>
         </div>
-        <div className="nav-items">
-          <button 
-            className={`nav-item ${mode === 'file' ? 'active' : ''}`} 
-            onClick={() => { setMode('file'); handleClear(); }}
-            title={t.fileCompare}
+        <div className="toolbar-drag-space" data-tauri-drag-region />
+        <div className="toolbar-actions">
+          <button
+            className="text-button"
+            aria-label={t.swap}
+            title={t.swap}
+            onClick={swap}
+            disabled={!hasContent || !!busy}
           >
-            <Files size={20} />
+            <ArrowRightLeft size={16} />
+            <span>{t.swap}</span>
           </button>
-          <button 
-            className={`nav-item ${mode === 'paste' ? 'active' : ''}`} 
-            onClick={() => { setMode('paste'); handleClear(); }}
-            title={t.textCompare}
+          <button
+            className="text-button danger"
+            aria-label={t.clear}
+            title={t.clear}
+            onClick={clear}
+            disabled={!hasContent || !!busy}
           >
-            <Type size={20} />
+            <Trash2 size={16} />
+            <span>{t.clear}</span>
+          </button>
+          <button
+            className="icon-button"
+            aria-label={t.settings}
+            title={t.settings}
+            onClick={() => setShowSettings(true)}
+          >
+            <Settings2 size={17} />
           </button>
         </div>
-        <div className="nav-footer">
-          <button className={`nav-item ${showSettings ? 'active' : ''}`} onClick={() => setShowSettings(true)} title={t.settings}>
-            <SettingsIcon size={20} />
-          </button>
-        </div>
-      </nav>
-
-      {/* Main Content */}
-      <main className="main-content">
-        <header className="app-header">
-          <div className="header-title">
-            <h1>{mode === 'file' ? t.fileCompare : t.textCompare}</h1>
-          </div>
-          
-          <div className="header-actions">
-            <button className="action-btn" onClick={handleSwap}>
-              <ArrowRightLeft size={16} />
-              {t.swap}
+        {isTauri() && (
+          <div className="window-controls">
+            <button className="window-button" title={t.minimize} aria-label={t.minimize} onClick={() => void windowAction("minimize")}>
+              <Minus size={16} />
             </button>
-            <button className="action-btn danger" onClick={handleClear}>
-              <Trash2 size={16} />
-              {t.clear}
+            <button className="window-button" title={maximized ? t.restoreWindow : t.maximize} aria-label={maximized ? t.restoreWindow : t.maximize} onClick={() => void windowAction("toggleMaximize")}>
+              {maximized ? <Minimize2 size={14} /> : <Maximize2 size={14} />}
+            </button>
+            <button className="window-button window-close" title={t.close} aria-label={t.close} onClick={() => void windowAction("close")}>
+              <X size={18} />
             </button>
           </div>
-        </header>
-
-        {/* Integrated Pane Headers */}
+        )}
+      </header>
+      <main className="comparison" aria-label={t.comparison}>
         <div className="pane-headers">
-          <div className="pane-header-item">
-            <div className="pane-label">
-              <FileText size={12} />
-              <span>{t.leftLabel}</span>
+          {(["original", "modified"] as Side[]).map((side) => (
+            <div className="pane-header" key={side}>
+              <strong>{t[side]}</strong>
+              <span
+                className="file-name"
+                title={session[side].path || session[side].name}
+              >
+                {session[side].name}
+              </span>
+              <span className="line-count">
+                {lineCount(session[side].content)} {t.lines}
+              </span>
+              <button
+                className="file-button"
+                disabled={!!busy}
+                title={t.uploadNote}
+                onClick={() => void selectFile(side)}
+                aria-label={
+                  (session[side].name ? t.replace : t.select) +
+                  " · " +
+                  t[side]
+                }
+              >
+                {busy === side ? (
+                  <Loader2 size={15} className="spin" />
+                ) : (
+                  <FolderOpen size={15} />
+                )}
+                <span>{session[side].name ? t.replace : t.select}</span>
+              </button>
             </div>
-            {mode === 'file' && (
-              <div className="pane-file-info" onClick={() => handleSelectFile('original')}>
-                <FolderOpen size={14} className="icon-blue" />
-                <span className="pane-file-name" title={original.path}>{original.name || t.chooseFile}</span>
-              </div>
-            )}
-          </div>
-          <div className="pane-header-item">
-            <div className="pane-label">
-              <FileText size={12} />
-              <span>{t.rightLabel}</span>
-            </div>
-            {mode === 'file' && (
-              <div className="pane-file-info" onClick={() => handleSelectFile('modified')}>
-                <FolderOpen size={14} className="icon-blue" />
-                <span className="pane-file-name" title={modified.path}>{modified.name || t.chooseFile}</span>
-              </div>
-            )}
-          </div>
+          ))}
         </div>
-
-        <div className="editor-wrapper">
-          <div className="editor-inner">
+        <div className="editor-area">
+          <Suspense
+            fallback={
+              <div className="editor-loading">
+                <Loader2 className="spin" size={20} />
+                {t.load}
+              </div>
+            }
+          >
             <DiffEditor
-              height="100%"
-              language="plaintext"
-              theme="vs-light"
-              onMount={handleEditorMount}
+              original={session.original.content}
+              modified={session.modified.content}
+              language={language}
+              theme="comparison-light"
+              beforeMount={(monaco) =>
+                monaco.editor.defineTheme("comparison-light", {
+                  base: "vs",
+                  inherit: true,
+                  rules: [],
+                  colors: {
+                    "editor.background": "#ffffff",
+                    "editor.foreground": "#34423e",
+                    "editorLineNumber.foreground": "#a4b0aa",
+                    "editor.lineHighlightBackground": "#f7faf8",
+                    "diffEditor.insertedTextBackground": "#66d99599",
+                    "diffEditor.removedTextBackground": "#f47d8999",
+                    "diffEditor.insertedLineBackground": "#edf9f1",
+                    "diffEditor.removedLineBackground": "#fff1ee",
+                    "editorGutter.addedBackground": "#30996b",
+                    "editorGutter.deletedBackground": "#d57a6d",
+                  },
+                })
+              }
+              onMount={onMount}
+              loading={
+                <div className="editor-loading">
+                  <Loader2 className="spin" size={20} />
+                  {t.load}
+                </div>
+              }
               options={{
                 renderSideBySide: true,
-                minimap: { enabled: true },
-                scrollBeyondLastLine: false,
+                renderMarginRevertIcon: false,
+                renderGutterMenu: false,
+                originalAriaLabel: t.original,
+                modifiedAriaLabel: t.modified,
+                useInlineViewWhenSpaceIsLimited: false,
+                readOnly: !!busy,
+                originalEditable: !busy,
                 automaticLayout: true,
-                fontSize: 13,
-                fontFamily: "'Fira Code', 'Cascadia Code', Consolas, monospace",
-                padding: { top: 10, bottom: 10 },
-                originalEditable: true,
+                minimap: { enabled: preferences.minimap },
+                fontSize: preferences.fontSize,
+                fontFamily: "'Cascadia Code', Consolas, monospace",
+                lineHeight: Math.max(24, Math.round(preferences.fontSize * 1.5)),
+                scrollBeyondLastLine: false,
+                padding: { top: 20, bottom: 20 },
+                renderLineHighlight: "gutter",
+                wordWrap: preferences.wrap ? "on" : "off",
+                diffWordWrap: preferences.wrap ? "on" : "off",
+                ignoreTrimWhitespace: preferences.ignoreWhitespace,
+                renderOverviewRuler: true,
+                overviewRulerBorder: false,
+                folding: false,
+                lineNumbersMinChars: 3,
+                glyphMargin: false,
+                renderIndicators: true,
+                enableSplitViewResizing: false,
+                hideUnchangedRegions: { enabled: false },
               }}
             />
+          </Suspense>
+          <div className="input-hints" aria-hidden="true">
+            {(["original", "modified"] as Side[]).map((side) => (
+              <span key={side}>{!session[side].content && t.inputHint}</span>
+            ))}
           </div>
         </div>
-
-        <footer className="app-footer">
-          <div className="status-item">
-            <strong>{t.mode}:</strong> {mode.toUpperCase()}
+        <div className="comparison-bottom">
+          <div className="display-options">
+            <label>
+              <input
+                type="checkbox"
+                checked={preferences.ignoreWhitespace}
+                onChange={(event) =>
+                  updatePreference("ignoreWhitespace", event.target.checked)
+                }
+              />
+              {t.whitespace}
+            </label>
+            <button
+              className={`option-button ${preferences.wrap ? "selected" : ""}`}
+              aria-label={t.wrap}
+              title={t.wrap}
+              aria-pressed={preferences.wrap}
+              onClick={() => updatePreference("wrap", !preferences.wrap)}
+            >
+              <WrapText size={16} />
+              {t.wrap}
+            </button>
           </div>
-          <div className="status-divider" />
-          <div className="status-item">
-            <strong>{t.engine}:</strong> Monaco Diff
+          <div className="diff-navigation">
+            {canCompare && !pending && summary.changes > 0 && (
+              <span className="diff-stats" title={t.added + " / " + t.removed}>
+                <span className="added">+{summary.added}</span>
+                <span className="removed">−{summary.removed}</span>
+              </span>
+            )}
+            <span
+              className={
+                canCompare && !pending && summary.changes === 0
+                  ? "identical"
+                  : ""
+              }
+            >
+              {busy ? t.reading : status}
+            </span>
+            <button
+              className="icon-button"
+              title={`${t.previous} (Shift+F7)`}
+              aria-label={t.previous}
+              disabled={!canCompare || pending || !summary.changes}
+              onClick={() => diffRef.current?.goToDiff("previous")}
+            >
+              <ArrowUp size={16} />
+            </button>
+            <button
+              className="icon-button"
+              title={`${t.next} (F7)`}
+              aria-label={t.next}
+              disabled={!canCompare || pending || !summary.changes}
+              onClick={() => diffRef.current?.goToDiff("next")}
+            >
+              <ArrowDown size={16} />
+            </button>
           </div>
-          <div className="status-spacer" />
-          <div className="status-item success">
-            {t.readyStatus}
-          </div>
-        </footer>
+        </div>
       </main>
-
-      {/* Settings Modal */}
-      {showSettings && (
-        <div className="modal-overlay">
-          <div className="modal-content">
-            <div className="modal-header">
-              <div className="modal-title">
-                <SettingsIcon size={18} />
-                <h2>{t.settings}</h2>
-              </div>
-              <button className="close-btn" onClick={() => setShowSettings(false)}>
-                <X size={20} />
-              </button>
-            </div>
-            <div className="modal-body">
-              <section className="settings-section">
-                <div className="section-header">
-                  <Languages size={16} />
-                  <h3>{t.language}</h3>
-                </div>
-                <div className="language-options">
-                  <button 
-                    className={`lang-opt ${lang === 'zh' ? 'selected' : ''}`}
-                    onClick={() => setLang('zh')}
-                  >
-                    <span>中文 (简体)</span>
-                    {lang === 'zh' && <Check size={16} />}
-                  </button>
-                  <button 
-                    className={`lang-opt ${lang === 'en' ? 'selected' : ''}`}
-                    onClick={() => setLang('en')}
-                  >
-                    <span>English</span>
-                    {lang === 'en' && <Check size={16} />}
-                  </button>
-                </div>
-              </section>
-            </div>
-            <div className="modal-footer">
-              <button className="primary-btn" onClick={() => setShowSettings(false)}>
-                {t.done}
-              </button>
-            </div>
-          </div>
+      <input
+        className="hidden-input"
+        type="file"
+        ref={pickerRef}
+        tabIndex={-1}
+        aria-hidden="true"
+        onChange={(event) => {
+          void loadBrowserFile(event.target.files?.[0]);
+          event.target.value = "";
+        }}
+      />
+      {(error || undo) && (
+        <div
+          className={`toast ${error ? "error" : ""}`}
+          role={error ? "alert" : "status"}
+        >
+          {error ? <X size={17} /> : <Check size={17} />}
+          <span>{error || t.cleared}</span>
+          {undo && !error && (
+            <button onClick={restore}>
+              <Undo2 size={15} />
+              {t.undo}
+            </button>
+          )}
+          <button
+            className="icon-button"
+            aria-label={t.close}
+            onClick={() => {
+              setError("");
+              setUndo(null);
+            }}
+          >
+            <X size={16} />
+          </button>
         </div>
       )}
+
+      <dialog
+        ref={dialogRef}
+        className="settings-dialog"
+        aria-label={t.settings}
+        onCancel={() => setShowSettings(false)}
+        onClick={(event) => {
+          if (event.target === event.currentTarget) setShowSettings(false);
+        }}
+      >
+        <header>
+          <h2>{t.settings}</h2>
+          <button
+            className="icon-button"
+            aria-label={t.close}
+            onClick={() => setShowSettings(false)}
+          >
+            <X size={18} />
+          </button>
+        </header>
+        <div className="settings-body">
+          <label className="settings-row">
+            {t.language}
+            <select
+              value={preferences.lang}
+              onChange={(event) =>
+                updatePreference("lang", event.target.value as Lang)
+              }
+            >
+              <option value="zh">简体中文</option>
+              <option value="en">English</option>
+            </select>
+          </label>
+          <label className="settings-row">
+            {t.fontSize}
+            <span className="font-size-control">
+              <input
+                type="number"
+                min={MIN_FONT_SIZE}
+                max={MAX_FONT_SIZE}
+                step={1}
+                value={fontSizeInput}
+                onChange={(event) => {
+                  setFontSizeInput(event.target.value);
+                  const size = event.target.valueAsNumber;
+                  if (isValidFontSize(size)) updatePreference("fontSize", size);
+                }}
+                onBlur={() => setFontSizeInput(String(preferences.fontSize))}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter") event.currentTarget.blur();
+                }}
+              />
+              <span aria-hidden="true">px</span>
+            </span>
+          </label>
+          <label className="settings-row">
+            {t.minimap}
+            <input
+              type="checkbox"
+              checked={preferences.minimap}
+              onChange={(event) =>
+                updatePreference("minimap", event.target.checked)
+              }
+            />
+          </label>
+        </div>
+      </dialog>
     </div>
   );
 }

@@ -1,7 +1,7 @@
 {
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
   "productName": "FileComparator",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "identifier": "com.filecomparator.dev",
   "build": {
     "frontendDist": "../dist",
@@ -15,9 +15,11 @@
         "title": "FileComparator",
         "width": 1200,
         "height": 800,
+        "minWidth": 720,
+        "minHeight": 560,
         "resizable": true,
         "fullscreen": false,
-        "decorations": true
+        "decorations": false
       }
     ],
     "security": {
